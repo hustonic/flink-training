@@ -19,15 +19,21 @@
 package org.apache.flink.training.exercises.hourlytips;
 
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.PrintSinkFunction;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.training.exercises.common.datatypes.TaxiFare;
 import org.apache.flink.training.exercises.common.sources.TaxiFareGenerator;
-import org.apache.flink.training.exercises.common.utils.MissingSolutionException;
+import org.apache.flink.util.Collector;
 
 /**
  * The Hourly Tips exercise from the Flink training.
@@ -40,7 +46,9 @@ public class HourlyTipsExercise {
     private final SourceFunction<TaxiFare> source;
     private final SinkFunction<Tuple3<Long, Long, Float>> sink;
 
-    /** Creates a job using the source and sink provided. */
+    /**
+     * Creates a job using the source and sink provided.
+     */
     public HourlyTipsExercise(
             SourceFunction<TaxiFare> source, SinkFunction<Tuple3<Long, Long, Float>> sink) {
 
@@ -73,12 +81,24 @@ public class HourlyTipsExercise {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
         // start the data generator
-        DataStream<TaxiFare> fares = env.addSource(source);
+        DataStream<TaxiFare> fares = env
+                .addSource(source)
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy.<TaxiFare>forMonotonousTimestamps()
+                                .withTimestampAssigner((fare, t) -> fare.getEventTimeMillis()));
 
         // replace this with your solution
-        if (true) {
-            throw new MissingSolutionException();
-        }
+        DataStream<Tuple3<Long, Long, Float>> totalTips = fares
+                .keyBy(fare -> fare.driverId)
+                .window(TumblingEventTimeWindows.of(Time.hours(1)))
+                .aggregate(new SumAggregationFunction(), new SumProcessWindowFunction());
+
+        DataStream<Tuple3<Long, Long, Float>> maxTotalTips = totalTips
+                .windowAll(TumblingEventTimeWindows.of(Time.hours(1)))
+                //.reduce((ReduceFunction<Tuple3<Long, Long, Float>>) (value1, value2) -> value1.f2 > value2.f2 ? value1 : value2);
+                .maxBy(2);
+
+        maxTotalTips.addSink(sink);
 
         // the results should be sent to the sink that was passed in
         // (otherwise the tests won't work)
@@ -89,5 +109,37 @@ public class HourlyTipsExercise {
 
         // execute the pipeline and return the result
         return env.execute("Hourly Tips");
+    }
+
+    public static class SumAggregationFunction implements AggregateFunction<TaxiFare, Float, Float> {
+
+        @Override
+        public Float createAccumulator() {
+            return 0F;
+        }
+
+        @Override
+        public Float add(TaxiFare value, Float accumulator) {
+            return accumulator + value.tip;
+        }
+
+        @Override
+        public Float getResult(Float accumulator) {
+            return accumulator;
+        }
+
+        @Override
+        public Float merge(Float a, Float b) {
+            return a + b;
+        }
+    }
+
+    public static class SumProcessWindowFunction extends ProcessWindowFunction<Float, Tuple3<Long, Long, Float>, Long, TimeWindow> {
+        @Override
+        public void process(Long key, Context context, Iterable<Float> input, Collector<Tuple3<Long, Long, Float>> out) throws Exception {
+            long endTime = context.window().getEnd();
+            Float sum = input.iterator().next();
+            out.collect(Tuple3.of(endTime, key, sum));
+        }
     }
 }
